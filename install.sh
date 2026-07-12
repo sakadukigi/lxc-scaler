@@ -18,6 +18,10 @@ TPL="/usr/share/pve-manager/index.html.tpl"
 APT_HOOK="/etc/apt/apt.conf.d/99-lxc-scaler"
 SERVICES=(lxc-scaler lxc-scaler-api)
 
+CLEANUP_DIR=""
+cleanup() { [ -n "${CLEANUP_DIR:-}" ] && rm -rf "$CLEANUP_DIR"; return 0; }
+trap cleanup EXIT
+
 say()  { echo -e "\033[1;36m[lxc-scaler]\033[0m $*"; }
 err()  { echo -e "\033[1;31m[lxc-scaler]\033[0m $*" >&2; }
 die()  { err "$*"; exit 1; }
@@ -65,11 +69,10 @@ resolve_source() {
     else
         command -v curl >/dev/null 2>&1 || die "curl is required to fetch the package."
         command -v tar  >/dev/null 2>&1 || die "tar is required to unpack the package."
-        local tmp; tmp="$(mktemp -d)"
-        trap 'rm -rf "$tmp"' EXIT
+        CLEANUP_DIR="$(mktemp -d)"
         say "Downloading package..."
-        curl -fsSL "$REPO_TARBALL" | tar xz -C "$tmp"
-        SRC_ROOT="$(find "$tmp" -maxdepth 1 -mindepth 1 -type d | head -1)"
+        curl -fsSL "$REPO_TARBALL" | tar xz -C "$CLEANUP_DIR"
+        SRC_ROOT="$(find "$CLEANUP_DIR" -maxdepth 1 -mindepth 1 -type d | head -1)"
         [ -n "$SRC_ROOT" ] && [ -d "$SRC_ROOT/src" ] || die "Downloaded package looks malformed."
     fi
 }

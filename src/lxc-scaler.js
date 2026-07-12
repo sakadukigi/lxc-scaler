@@ -2,7 +2,9 @@
 (function () {
 
     function pad(n) { return n < 10 ? '0' + n : '' + n; }
-    function cfgApi() { return 'https://' + window.location.hostname + ':8087/config'; }
+    function apiBase() { return 'https://' + window.location.hostname + ':8087'; }
+    function cfgApi() { return apiBase() + '/config'; }
+    function peersApi() { return apiBase() + '/peers-data'; }
 
     Ext.define('PVE.lxcscaler.Panel', {
         extend: 'Ext.panel.Panel',
@@ -14,8 +16,8 @@
 
         initComponent: function () {
             var me = this;
-            me.allData = {};
-            me.selectedVmid = null;
+            me.groups = [];        // [{addr, host, containers:{vmid:{name,history,events}}}]
+            me.selectedKey = null; // 'addr:vmid'
 
             me.eventStore = Ext.create('Ext.data.JsonStore', {
                 fields: ['time', 'resource', 'old', 'new_val', 'dir', 'reason'],
@@ -152,6 +154,19 @@
                         },
                         {
                             xtype: 'fieldset',
+                            title: gettext('Peer hosts (multi-node aggregation)'),
+                            margin: '8 0 0 0',
+                            layout: 'fit',
+                            items: [{
+                                xtype: 'textfield',
+                                itemId: 'cfgPeers',
+                                fieldLabel: gettext('Peers (comma-separated IP/host)'),
+                                labelWidth: 240,
+                                emptyText: '192.168.0.21, 192.168.0.22'
+                            }]
+                        },
+                        {
+                            xtype: 'fieldset',
                             title: gettext('Per-container overrides (JSON)'),
                             margin: '8 0 0 0',
                             layout: 'fit',
@@ -198,24 +213,56 @@
             });
         },
 
+        // Local data ({host, containers} or legacy flat) + peers -> me.groups, then render.
         loadData: function () {
             var me = this;
             Ext.Ajax.request({
                 url: '/pve2/js/lxcscaler-data.json?_=' + Date.now(),
                 success: function (resp) {
-                    try {
-                        me.allData = Ext.decode(resp.responseText);
-                        me.updateToolbar();
-                        var vmids = Object.keys(me.allData);
-                        if (vmids.length > 0) {
-                            var sel = (me.selectedVmid && me.allData[me.selectedVmid]) ? me.selectedVmid : vmids[0];
-                            me.selectContainer(sel);
-                        }
-                    } catch (e) {
-                        console.error('lxcscaler parse error', e);
-                    }
-                }
+                    var groups = [];
+                    try { groups.push(me.normalize(Ext.decode(resp.responseText), 'local')); } catch (e) {}
+                    me.fetchPeers(groups);
+                },
+                failure: function () { me.fetchPeers([]); }
             });
+        },
+
+        fetchPeers: function (groups) {
+            var me = this;
+            Ext.Ajax.request({
+                url: peersApi() + '?_=' + Date.now(),
+                success: function (resp) {
+                    try {
+                        var peers = Ext.decode(resp.responseText) || {};
+                        Ext.Object.each(peers, function (addr, pd) {
+                            if (pd && pd.containers) { groups.push(me.normalize(pd, addr)); }
+                        });
+                    } catch (e) {}
+                    me.applyGroups(groups);
+                },
+                failure: function () { me.applyGroups(groups); }
+            });
+        },
+
+        normalize: function (raw, addr) {
+            if (raw && raw.containers) {
+                return { addr: addr, host: raw.host || addr, containers: raw.containers };
+            }
+            return { addr: addr, host: addr, containers: raw || {} };
+        },
+
+        applyGroups: function (groups) {
+            var me = this;
+            me.groups = groups;
+            me.updateToolbar();
+            var keys = [];
+            groups.forEach(function (g) {
+                Object.keys(g.containers).forEach(function (v) { keys.push(g.addr + ':' + v); });
+            });
+            if (keys.length) {
+                var sel = (me.selectedKey && keys.indexOf(me.selectedKey) >= 0) ? me.selectedKey : keys[0];
+                me.selectKey(sel);
+            }
         },
 
         loadConfig: function () {
@@ -235,6 +282,7 @@
                         me.down('#cfgCpuLow').setValue(Math.round((d.cpu_low || 0) * 100));
                         me.down('#cfgCpuHigh').setValue(Math.round((d.cpu_high || 0) * 100));
                         me.down('#cfgCooldown').setValue(d.cooldown_sec);
+                        me.down('#cfgPeers').setValue((cfg.peers || []).join(', '));
                         var ct = cfg.containers || {};
                         me.down('#cfgContainers').setValue(
                             Object.keys(ct).length ? JSON.stringify(ct, null, 2) : ''
@@ -268,6 +316,10 @@
                 Ext.Msg.alert(gettext('Error'), 'Invalid JSON in per-container overrides: ' + e.message);
                 return;
             }
+            var peers = (me.down('#cfgPeers').getValue() || '')
+                .split(/[\s,]+/)
+                .map(function (s) { return s.trim(); })
+                .filter(function (s) { return s; });
             var cfg = {
                 defaults: {
                     mem_min_mb: me.down('#cfgMemMin').getValue(),
@@ -280,7 +332,8 @@
                     cpu_high: (me.down('#cfgCpuHigh').getValue() || 0) / 100,
                     cooldown_sec: me.down('#cfgCooldown').getValue()
                 },
-                containers: containers
+                containers: containers,
+                peers: peers
             };
             Ext.Ajax.request({
                 url: cfgApi(),
@@ -291,6 +344,7 @@
                     me.down('#cfgStatus').update(
                         '<span style="color:green">Configuration saved.</span>'
                     );
+                    me.loadData();
                 },
                 failure: function () {
                     me.down('#cfgStatus').update(
@@ -305,14 +359,18 @@
             var tb = me.getComponent('ctToolbar');
             if (!tb) { return; }
             tb.removeAll();
-            tb.add({ xtype: 'tbtext', html: '<b>Container:</b>&nbsp;' });
-            Ext.Object.each(me.allData, function (vmid, d) {
-                tb.add({
-                    text: d.name + ' (' + vmid + ')',
-                    enableToggle: true,
-                    toggleGroup: 'lxcscaler_ct',
-                    pressed: vmid === me.selectedVmid,
-                    handler: function () { me.selectContainer(vmid); }
+            me.groups.forEach(function (g, gi) {
+                if (gi > 0) { tb.add({ xtype: 'tbseparator' }); }
+                tb.add({ xtype: 'tbtext', html: '<b>' + Ext.htmlEncode(g.host) + ':</b>&nbsp;' });
+                Ext.Object.each(g.containers, function (vmid, d) {
+                    var key = g.addr + ':' + vmid;
+                    tb.add({
+                        text: Ext.htmlEncode(d.name) + ' (' + vmid + ')',
+                        enableToggle: true,
+                        toggleGroup: 'lxcscaler_ct',
+                        pressed: key === me.selectedKey,
+                        handler: function () { me.selectKey(key); }
+                    });
                 });
             });
             tb.add('->');
@@ -323,12 +381,18 @@
             });
         },
 
-        selectContainer: function (vmid) {
+        selectKey: function (key) {
             var me = this;
-            me.selectedVmid = vmid;
-            if (!me.allData || !me.allData[vmid]) { return; }
-            var hist = me.allData[vmid].history || [];
-            var events = me.allData[vmid].events || [];
+            me.selectedKey = key;
+            var sep = key.indexOf(':');
+            var addr = key.substring(0, sep);
+            var vmid = key.substring(sep + 1);
+            var group = null;
+            me.groups.forEach(function (g) { if (g.addr === addr) { group = g; } });
+            if (!group || !group.containers[vmid]) { return; }
+            var cd = group.containers[vmid];
+            var hist = cd.history || [];
+            var events = cd.events || [];
 
             var memData = hist.map(function (h) {
                 return {

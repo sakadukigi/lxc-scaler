@@ -93,7 +93,8 @@ seed_config() {
     "cpu_low": 0.1,
     "cpu_high": 0.9
   },
-  "containers": {}
+  "containers": {},
+  "peers": []
 }
 JSON
     say "Wrote default config.json"

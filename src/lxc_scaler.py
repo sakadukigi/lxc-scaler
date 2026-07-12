@@ -18,6 +18,7 @@ CONFIG_FILE = "/opt/lxc-scaler/config.json"
 DATA_FILE = "/usr/share/pve-manager/js/lxcscaler-data.json"
 MAX_HISTORY = 1440  # 24h at 60s intervals
 INTERVAL = 60
+NODENAME = os.uname().nodename
 
 DEFAULT_CONFIG = {
     "mem_min_mb": 128,
@@ -200,13 +201,14 @@ def process(vmid, status, cdata, cfg):
 
 
 def write_ui_data(cdata):
-    ui = {}
+    containers = {}
     for vmid_s, d in cdata.items():
-        ui[vmid_s] = {
+        containers[vmid_s] = {
             "name": d["name"],
             "history": list(d["history"]),
             "events": list(d["events"]),
         }
+    ui = {"host": NODENAME, "containers": containers}
     tmp = DATA_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(ui, f)

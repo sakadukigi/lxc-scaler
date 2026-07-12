@@ -46,6 +46,16 @@ or edit `/opt/lxc-scaler/config.json` directly and the daemon picks it up on the
 }
 ```
 
+## Multi-node aggregation
+
+Each host's panel can also show the containers of other LXC-Scaler hosts. Add peer
+hosts in the panel's **Peers** field (or set `"peers": ["192.168.0.21"]` in
+`config.json`) and Save. The local config API fetches each peer's data server-side
+(`GET /peers-data` → each peer's `GET /data`), so the browser only talks to the
+local host — no need to accept peer certificates. Set `peers` reciprocally for a
+symmetric view. Containers are grouped by hostname; each host still scales only its
+own containers.
+
 ## Components
 
 | Path | Role |

@@ -8,11 +8,15 @@ import http.server
 import json
 import os
 import ssl
+import urllib.request
 
 CONFIG_FILE = "/opt/lxc-scaler/config.json"
+DATA_FILE = "/usr/share/pve-manager/js/lxcscaler-data.json"
 CERT_FILE = "/etc/pve/local/pve-ssl.pem"
 KEY_FILE = "/etc/pve/local/pve-ssl.key"
 PORT = 8087
+NODENAME = os.uname().nodename
+PEER_TIMEOUT = 3
 
 DEFAULT_CONFIG = {
     "defaults": {
@@ -26,8 +30,32 @@ DEFAULT_CONFIG = {
         "cpu_low": 0.10,
         "cpu_high": 0.90
     },
-    "containers": {}
+    "containers": {},
+    "peers": []
 }
+
+# Peers use self-signed PVE certs; verify off for LAN peer-to-peer fetch.
+_SSL_NOVERIFY = ssl.create_default_context()
+_SSL_NOVERIFY.check_hostname = False
+_SSL_NOVERIFY.verify_mode = ssl.CERT_NONE
+
+
+def load_peers():
+    try:
+        with open(CONFIG_FILE) as f:
+            cfg = json.load(f)
+        return [str(p).strip() for p in cfg.get("peers", []) if str(p).strip()]
+    except Exception:
+        return []
+
+
+def fetch_peer(host):
+    url = f"https://{host}:{PORT}/data"
+    try:
+        with urllib.request.urlopen(url, timeout=PEER_TIMEOUT, context=_SSL_NOVERIFY) as r:
+            return json.loads(r.read().decode())
+    except Exception:
+        return None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -44,22 +72,38 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
-    def do_GET(self):
-        if self.path.split('?')[0] != "/config":
-            self.send_response(404)
-            self._cors()
-            self.end_headers()
-            return
-        try:
-            with open(CONFIG_FILE) as f:
-                data = f.read()
-        except FileNotFoundError:
-            data = json.dumps(DEFAULT_CONFIG, indent=2)
-        self.send_response(200)
+    def _send_json(self, code, text):
+        self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self._cors()
         self.end_headers()
-        self.wfile.write(data.encode())
+        self.wfile.write(text.encode())
+
+    def do_GET(self):
+        path = self.path.split('?')[0]
+        if path == "/config":
+            try:
+                with open(CONFIG_FILE) as f:
+                    data = f.read()
+            except FileNotFoundError:
+                data = json.dumps(DEFAULT_CONFIG, indent=2)
+            self._send_json(200, data)
+        elif path == "/data":
+            # Local UI data ({host, containers}); consumed by peers' /peers-data.
+            try:
+                with open(DATA_FILE) as f:
+                    data = f.read()
+            except FileNotFoundError:
+                data = json.dumps({"host": NODENAME, "containers": {}})
+            self._send_json(200, data)
+        elif path == "/peers-data":
+            # Server-side proxy: fetch each configured peer's /data (verify off).
+            out = {p: fetch_peer(p) for p in load_peers()}
+            self._send_json(200, json.dumps(out))
+        else:
+            self.send_response(404)
+            self._cors()
+            self.end_headers()
 
     def do_POST(self):
         if self.path.split('?')[0] != "/config":

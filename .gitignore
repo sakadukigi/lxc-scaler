@@ -1,0 +1,5 @@
+schedules.json
+auth.cookie
+__pycache__/
+*.pyc
+.claude/
